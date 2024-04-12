@@ -6,6 +6,7 @@ using Aspire.Seq;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using OpenTelemetry;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Trace;
@@ -42,26 +43,50 @@ public static class AspireSeqExtensions
             settings.ServerUrl = "http://localhost:5341";
         }
 
-        builder.Services.Configure<OpenTelemetryLoggerOptions>(logging => logging.AddOtlpExporter(opt =>
-        {
-            opt.Endpoint = new Uri($"{settings.ServerUrl}/ingest/otlp/v1/logs");
-            opt.Protocol = OtlpExportProtocol.HttpProtobuf;
-            if (!string.IsNullOrEmpty(settings.ApiKey))
+        builder.Services.Configure<OpenTelemetryLoggerOptions>(logging => logging.AddProcessor(
+            sp =>
             {
-                opt.Headers = $"X-Seq-ApiKey={settings.ApiKey}";
-            }
-        }));
-        builder.Services.ConfigureOpenTelemetryTracerProvider(tracing => tracing
-            .AddOtlpExporter(opt =>
+                // Note: We're not calling OTel AddOtlpExporter extension here
+                // and creating options\processor\exporter directly to avoid
+                // exceptions when the UseOtlpExporter extension is also called.
+                // Creating things directly has a slight behavioral difference.
+                // When using the extension OTel will look for envvar keys using
+                // whatever IConfiguration the host has. The ctors use an
+                // IConfiguration built from just envvars so the values can't be
+                // set in something like appSettings.json using this method.
+
+                var options = new OtlpExporterOptions()
                 {
-                    opt.Endpoint = new Uri($"{settings.ServerUrl}/ingest/otlp/v1/traces");
-                    opt.Protocol = OtlpExportProtocol.HttpProtobuf;
-                    if (!string.IsNullOrEmpty(settings.ApiKey))
-                    {
-                        opt.Headers = $"X-Seq-ApiKey={settings.ApiKey}";
-                    }
+                    Endpoint = new Uri($"{settings.ServerUrl}/ingest/otlp/v1/logs"),
+                    Protocol = OtlpExportProtocol.HttpProtobuf
+                };
+
+                if (!string.IsNullOrEmpty(settings.ApiKey))
+                {
+                    options.Headers = $"X-Seq-ApiKey={settings.ApiKey}";
                 }
-            ));
+
+                return new BatchLogRecordExportProcessor(new OtlpLogExporter(options));
+            }));
+
+        builder.Services.ConfigureOpenTelemetryTracerProvider(tracing => tracing.AddProcessor(
+            sp =>
+            {
+                // See note above about behaviors when not calling AddOtlpExporter extension.
+
+                var options = new OtlpExporterOptions()
+                {
+                    Endpoint = new Uri($"{settings.ServerUrl}/ingest/otlp/v1/traces"),
+                    Protocol = OtlpExportProtocol.HttpProtobuf
+                };
+
+                if (!string.IsNullOrEmpty(settings.ApiKey))
+                {
+                    options.Headers = $"X-Seq-ApiKey={settings.ApiKey}";
+                }
+
+                return new BatchActivityExportProcessor(new OtlpTraceExporter(options));
+            }));
 
         if (settings.HealthChecks)
         {
